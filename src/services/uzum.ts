@@ -15,10 +15,17 @@ export interface UzumMatchResult {
  * фронтенда Uzum схема может измениться — тогда правится только этот файл.
  *
  * Домен из исходного ТЗ (graphql.umarket.uz) больше не резолвится — заменён на
- * актуальный graphql.uzum.uz (см. scripts/discover-uzum-api.ts). Без заголовка
- * X-Iid эндпоинт отвечает 401 — используем стабильный per-process идентификатор,
- * как это делают клиентские приложения. Точный набор нужных заголовков и полей
- * ответа — подтвердить через scripts/prototype-uzum.ts перед продакшеном.
+ * актуальный graphql.uzum.uz. Перед GraphQL стоит шлюз, который без корректных
+ * заголовков отвечает 401 с пустым телом (не ошибка GraphQL-сервера). Реальный
+ * набор заголовков подтверждён через DevTools (Network → Copy as cURL на uzum.uz):
+ * нужен Authorization: Bearer <анонимный JWT от "Uzum ID">, apollographql-client-*,
+ * city-id/latitude/longitude, X-Iid. Токен живёт ~3 часа и пока подставляется вручную
+ * через UZUM_BEARER_TOKEN — программный способ его получать ещё предстоит найти
+ * (см. README, раздел про открытые вопросы). Без него запросы будут падать в 401,
+ * и пайплайн уйдёт в резерв (Apify) или в нейтральный noveltyLabel.
+ *
+ * Точное имя запроса/полей для поиска товаров (не автодополнения) — тоже ещё не
+ * подтверждено, см. scripts/prototype-uzum.ts.
  *
  * Резерв при нестабильности: переключение на платный Apify Uzum Scraper (см. searchUzumViaApify).
  */
@@ -35,20 +42,37 @@ const SEARCH_QUERY = `
   }
 `;
 
+function uzumHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "*/*",
+    "Accept-Language": "ru-RU",
+    "apollographql-client-name": "web-customers",
+    "apollographql-client-version": env.uzumClientVersion,
+    "city-id": env.uzumCityId,
+    "city-latitude": env.uzumCityLat,
+    "city-longitude": env.uzumCityLon,
+    latitude: env.uzumCityLat,
+    longitude: env.uzumCityLon,
+    Origin: "https://uzum.uz",
+    Referer: "https://uzum.uz/",
+    "X-Iid": DEVICE_IID,
+  };
+  if (env.uzumBearerToken) headers.Authorization = `Bearer ${env.uzumBearerToken}`;
+  return headers;
+}
+
 export async function searchUzumMatches(keyword: string, take = 40): Promise<UzumMatchResult> {
+  if (!env.uzumBearerToken) {
+    logger.warn("UZUM_BEARER_TOKEN не задан — GraphQL Uzum вернёт 401, уходим в резерв");
+    return await searchUzumViaApify(keyword);
+  }
+
   try {
     const { data } = await axios.post(
       env.uzumGraphqlUrl,
       { query: SEARCH_QUERY, variables: { text: keyword, take } },
-      {
-        timeout: 15_000,
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "Accept-Language": "ru-RU",
-          "X-Iid": DEVICE_IID,
-        },
-      }
+      { timeout: 15_000, headers: uzumHeaders() }
     );
 
     const search = data?.data?.makeSearch;
