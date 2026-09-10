@@ -72,34 +72,39 @@ async function post(query: string, variables: Record<string, unknown>, operation
 
 // Достаёт поля типа/input-типа с разворачиванием NON_NULL/LIST на 3 уровня —
 // этого обычно хватает, чтобы увидеть реальную "форму" поля.
-const TYPE_INTROSPECTION_QUERY = `
-  query TypeInfo($name: String!) {
-    __type(name: $name) {
-      name
-      kind
-      fields { name type { ...TypeRef } }
-      inputFields { name type { ...TypeRef } }
+// Имя типа подставляется прямо в текст запроса (не через $variables) — их бэкенд
+// (судя по формулировке ошибок — graphql-java, не Apollo Server) почему-то не
+// принимал переменные в этом запросе, хотя в других запросах они работали.
+function typeIntrospectionQuery(typeName: string): string {
+  return `
+    query TypeInfo {
+      __type(name: "${typeName}") {
+        name
+        kind
+        fields { name type { ...TypeRef } }
+        inputFields { name type { ...TypeRef } }
+      }
     }
-  }
-  fragment TypeRef on __Type {
-    name
-    kind
-    ofType {
+    fragment TypeRef on __Type {
       name
       kind
       ofType {
         name
         kind
-        ofType { name kind }
+        ofType {
+          name
+          kind
+          ofType { name kind }
+        }
       }
     }
-  }
-`;
+  `;
+}
 
 async function introspectType(name: string) {
   console.log(`\n=== Схема типа: ${name} ===`);
   try {
-    const { status, json } = await post(TYPE_INTROSPECTION_QUERY, { name });
+    const { status, json } = await post(typeIntrospectionQuery(name), {});
     console.log(`HTTP ${status}`);
     console.log(JSON.stringify(json, null, 2));
   } catch (err) {
