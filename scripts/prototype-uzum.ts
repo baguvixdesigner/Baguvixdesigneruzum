@@ -45,11 +45,12 @@ async function post(headers: Record<string, string>, query: string, variables: R
     body: JSON.stringify({ query, variables }),
   });
   const status = res.status;
+  const bodyText = await res.text();
   let json: unknown;
   try {
-    json = await res.json();
+    json = JSON.parse(bodyText);
   } catch {
-    json = await res.text();
+    json = bodyText;
   }
   return { status, json };
 }
