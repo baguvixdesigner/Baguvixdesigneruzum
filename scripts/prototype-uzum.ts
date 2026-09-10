@@ -1,22 +1,24 @@
 /**
  * Разовый диагностический скрипт для раздела "Следующий шаг" из ТЗ:
- * прототип запроса к GraphQL Uzum — найти реальный запрос поиска товаров и
- * проверить, что он отдаёт нужные поля (цена, отзывы/заказы).
+ * прототип запроса к GraphQL Uzum — реальный запрос поиска товаров с ценой,
+ * фото и сигналом "заказы/отзывы".
  *
  * История (см. README):
  * - graphql.umarket.uz из ТЗ не резолвится. Живой домен: graphql.uzum.uz.
  * - Нужен Authorization: Bearer <анонимный JWT от "Uzum ID"> + apollographql-client-*,
- *   city-id/latitude/longitude, X-Iid — иначе шлюз отвечает 401 с пустым телом.
- * - Интроспекция схемы не отключена. Реальный поиск — `makeSearch(query:
- *   MakeSearchQueryInput!): MakeSearchResult`, товары — в `MakeSearchResult.items: [Item!]`.
- *   Обязательные поля запроса: showAdultContent (enum), filters ([FilterInput!]!),
- *   sort (enum), pagination (PaginationInput!).
- *
- * Этот скрипт вместо дальнейших ручных догадок САМ:
- *  1) вытаскивает значения enum'ов ShowAdultContent/Sort и поля PaginationInput;
- *  2) рекурсивно (с мемоизацией и защитой от циклов) строит selection set для Item,
- *     пропуская поля, требующие обязательных аргументов, которые мы не можем угадать;
- *  3) собирает и отправляет реальный makeSearch-запрос, печатает результат.
+ *   city-id/latitude/longitude, X-Iid — иначе шлюз (Apollo Federation, судя по
+ *   ошибкам subrequest от отдельных сервисов вроде "ad-market") отвечает 401
+ *   с пустым телом.
+ * - Реальный поиск — makeSearch(query: MakeSearchQueryInput!): MakeSearchResult,
+ *   товары — MakeSearchResult.items: [Item!], подтверждено рабочим прогоном
+ *   (HTTP 200, total: 7449 по "женское платье").
+ * - Item.catalogCard — union-тип CatalogCard (ProductCard | SkuCard | SkuGroupCard).
+ *   Автоматический интроспектор в предыдущей версии скрипта не разворачивал
+ *   union-поля (только __typename), поэтому карточка товара приходила пустой.
+ *   Вместо доразработки автогенератора unions — используем РЕАЛЬНУЮ структуру
+ *   фрагмента ProductCardFragment, пойманную в самом первом DevTools-дампе
+ *   (Suggestions → recommendationBlock → card): она уже подтверждена рабочей
+ *   на их фронтенде и должна работать один в один для item.catalogCard.
  *
  * Запуск:
  *   UZUM_BEARER_TOKEN="eyJ..." npx tsx scripts/prototype-uzum.ts ["поисковый запрос"]
@@ -76,21 +78,16 @@ async function post(query: string, variables: Record<string, unknown> = {}) {
   return { status, json };
 }
 
-// ---- Интроспекция типов --------------------------------------------------
+// ---- Интроспекция enum'ов/inputFields (уже подтверждено рабочим) ---------
 
 interface TypeRefNode {
   kind: string;
   name: string | null;
   ofType: TypeRefNode | null;
 }
-interface FieldArgNode {
-  name: string;
-  type: TypeRefNode;
-}
 interface FieldNode {
   name: string;
   type: TypeRefNode;
-  args?: FieldArgNode[];
 }
 interface EnumValueNode {
   name: string;
@@ -103,10 +100,6 @@ interface TypeInfo {
   enumValues: EnumValueNode[] | null;
 }
 
-// Имя типа подставляется прямо в текст запроса (не через $variables) — их бэкенд
-// (судя по формулировке ошибок — graphql-java, не Apollo Server) почему-то не
-// принимал переменные именно в запросах интроспекции, хотя в обычных запросах
-// переменные работают нормально.
 function typeIntrospectionQuery(typeName: string): string {
   return `
     query TypeInfo {
@@ -115,86 +108,20 @@ function typeIntrospectionQuery(typeName: string): string {
         kind
         enumValues { name }
         inputFields { name type { ...TypeRef } }
-        fields {
-          name
-          args { name type { ...TypeRef } }
-          type { ...TypeRef }
-        }
+        fields { name type { ...TypeRef } }
       }
     }
     fragment TypeRef on __Type {
       kind
       name
-      ofType {
-        kind
-        name
-        ofType {
-          kind
-          name
-          ofType {
-            kind
-            name
-            ofType { kind name }
-          }
-        }
-      }
+      ofType { kind name ofType { kind name } }
     }
   `;
 }
 
-const typeCache = new Map<string, TypeInfo | null>();
-
 async function fetchType(name: string): Promise<TypeInfo | null> {
-  if (typeCache.has(name)) return typeCache.get(name) ?? null;
   const { json } = await post(typeIntrospectionQuery(name));
-  const type = ((json as any)?.data?.__type ?? null) as TypeInfo | null;
-  typeCache.set(name, type);
-  return type;
-}
-
-// Разворачивает NON_NULL/LIST-обёртки до именованного типа.
-function resolveNamed(node: TypeRefNode): { kind: string; name: string | null; isList: boolean } {
-  let isList = false;
-  let cur: TypeRefNode | null = node;
-  while (cur) {
-    if (cur.kind === "LIST") isList = true;
-    if (cur.name) return { kind: cur.kind, name: cur.name, isList };
-    cur = cur.ofType;
-  }
-  return { kind: "UNKNOWN", name: null, isList };
-}
-
-const SCALAR_KINDS = new Set(["SCALAR", "ENUM"]);
-
-// Рекурсивно строит selection set для объектного типа: скаляры/энумы — напрямую,
-// вложенные объекты — рекурсивно (с ограничением глубины и защитой от циклов),
-// поля с обязательными аргументами — пропускаются (мы не можем их угадать).
-async function buildSelectionSet(typeName: string, depth: number, visited: Set<string>): Promise<string> {
-  if (depth < 0 || visited.has(typeName)) return "";
-  const type = await fetchType(typeName);
-  if (!type?.fields) return "";
-
-  const nextVisited = new Set(visited);
-  nextVisited.add(typeName);
-
-  const parts: string[] = [];
-  for (const field of type.fields) {
-    const hasRequiredArg = (field.args ?? []).some((a) => a.type.kind === "NON_NULL");
-    if (hasRequiredArg) continue;
-
-    const resolved = resolveNamed(field.type);
-    if (!resolved.name) continue;
-
-    if (SCALAR_KINDS.has(resolved.kind)) {
-      parts.push(field.name);
-    } else if (resolved.kind === "OBJECT" && depth > 0) {
-      const sub = await buildSelectionSet(resolved.name, depth - 1, nextVisited);
-      if (sub) parts.push(`${field.name} { ${sub} }`);
-    } else if ((resolved.kind === "INTERFACE" || resolved.kind === "UNION") && depth > 0) {
-      parts.push(`${field.name} { __typename }`);
-    }
-  }
-  return parts.join(" ");
+  return ((json as any)?.data?.__type ?? null) as TypeInfo | null;
 }
 
 function pickEnumValue(type: TypeInfo | null, preferSubstrings: string[]): string | null {
@@ -211,6 +138,34 @@ function graphqlStringLiteral(s: string): string {
   return JSON.stringify(s);
 }
 
+// Реальный, подтверждённый DevTools-дампом фрагмент карточки товара.
+// title/adult — общие поля discovery; id/productId различаются по конкретному
+// типу (DiscoveryProductCard/DiscoverySkuCard/DiscoverySkuGroupCard).
+// feedback.quantity — похоже на число отзывов (не гарантированно = числу
+// заказов, но ближайший доступный в этой карточке сигнал; есть отдельный
+// sort BY_ORDERS_NUMBER_DESC на верхнем уровне поиска — значит точное число
+// заказов Uzum хранит, но не факт что отдаёт в этой карточке напрямую).
+const CATALOG_CARD_SELECTION = `
+  ... on ProductCard { carrierCode cpoId cpoVersion }
+  ... on SkuGroupCard { carrierCode }
+  discovery {
+    ... on DiscoveryProductCard { id }
+    ... on DiscoverySkuCard { id productId }
+    ... on DiscoverySkuGroupCard { id productId }
+    title
+    adult
+    priceBlock {
+      sellPrice { amount description }
+      finalPrice { amount description }
+      fullPrice { amount description }
+    }
+    photos { key link(trans: SIZE_540) { high } }
+    feedback { quantity rating }
+    singleSku
+    defaultSkuId
+  }
+`;
+
 async function main() {
   console.log(`Эндпоинт: ${ENDPOINT}`);
   console.log(`Поисковый запрос: "${SEARCH_TEXT}"\n`);
@@ -222,12 +177,9 @@ async function main() {
     fetchType("PaginationInput"),
   ]);
 
-  console.log("ShowAdultContent enumValues:", showAdultContentType?.enumValues?.map((v) => v.name));
-  console.log("Sort enumValues:", sortType?.enumValues?.map((v) => v.name));
-  console.log("PaginationInput inputFields:", paginationType?.inputFields?.map((f) => f.name));
-
   const showAdultContentValue = pickEnumValue(showAdultContentType, ["HIDE", "DISALLOW", "NOT_SHOW", "FALSE", "NO"]);
   const sortValue = pickEnumValue(sortType, ["POPULAR", "RELEVANCE", "RATING", "DEFAULT"]);
+  console.log(`showAdultContent=${showAdultContentValue}, sort=${sortValue}`);
 
   const pagination: Record<string, number> = {};
   for (const f of paginationType?.inputFields ?? []) {
@@ -239,22 +191,23 @@ async function main() {
     }
   }
 
-  console.log(`\nВыбрано: showAdultContent=${showAdultContentValue}, sort=${sortValue}, pagination=`, pagination);
+  // Ищем явное поле про число заказов на конкретных типах карточки — sort
+  // BY_ORDERS_NUMBER_DESC подтверждает, что Uzum это где-то считает.
+  console.log("\n=== Ищем поля про заказы на ProductCard/SkuCard/SkuGroupCard ===");
+  for (const typeName of ["ProductCard", "SkuCard", "SkuGroupCard", "DiscoveryProductCard", "DiscoverySkuCard", "DiscoverySkuGroupCard"]) {
+    const t = await fetchType(typeName);
+    const names = t?.fields?.map((f) => f.name) ?? [];
+    const orderish = names.filter((n) => /order|sold|sale/i.test(n));
+    console.log(`${typeName}: все поля = [${names.join(", ")}]`);
+    if (orderish.length) console.log(`  ⭐ похоже на заказы: [${orderish.join(", ")}]`);
+  }
 
-  console.log("\n=== Строим selection set для Item (рекурсивно, может занять до минуты) ===");
-  const itemSelection = await buildSelectionSet("Item", 4, new Set());
-  console.log("Item selection set:\n" + itemSelection);
-
-  if (!showAdultContentValue || !sortValue || !itemSelection) {
-    console.log(
-      "\n⚠️  Не удалось собрать все части запроса автоматически (см. значения выше). " +
-        "Пришлите весь вывод — доберём вручную."
-    );
+  if (!showAdultContentValue || !sortValue) {
+    console.log("\n⚠️  Не удалось определить enum'ы автоматически — пришлите вывод целиком.");
     return;
   }
 
-  const paginationLiteral =
-    "{ " + Object.entries(pagination).map(([k, v]) => `${k}: ${v}`).join(", ") + " }";
+  const paginationLiteral = "{ " + Object.entries(pagination).map(([k, v]) => `${k}: ${v}`).join(", ") + " }";
   const queryLiteral =
     `{ text: ${graphqlStringLiteral(SEARCH_TEXT)}, showAdultContent: ${showAdultContentValue}, ` +
     `filters: [], sort: ${sortValue}, pagination: ${paginationLiteral} }`;
@@ -263,12 +216,15 @@ async function main() {
     query Search {
       makeSearch(query: ${queryLiteral}) {
         total
-        items { ${itemSelection} }
+        items {
+          bidId
+          catalogCard { ${CATALOG_CARD_SELECTION} }
+        }
       }
     }
   `;
 
-  console.log("\n=== Отправляем реальный makeSearch ===");
+  console.log("\n=== Отправляем реальный makeSearch с настоящей карточкой товара ===");
   console.log(searchQuery);
   try {
     const { status, json } = await post(searchQuery);
@@ -278,7 +234,7 @@ async function main() {
     console.log("Ошибка запроса:", err);
   }
 
-  console.log("\nГотово. Пришлите вывод целиком — особенно блок 'Отправляем реальный makeSearch'.");
+  console.log("\nГотово. Пришлите вывод целиком.");
 }
 
 main();
