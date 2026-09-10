@@ -1,16 +1,22 @@
 /**
  * Разовый диагностический скрипт для раздела "Следующий шаг" из ТЗ:
- * быстрый прототип запроса к GraphQL Uzum — проверить, что поиск по
- * ключевым словам отдаёт нужные поля (цена, число заказов/отзывов).
+ * прототип запроса к GraphQL Uzum — найти реальный запрос поиска товаров и
+ * проверить, что он отдаёт нужные поля (цена, отзывы/заказы).
  *
- * История (см. README для деталей):
- * - graphql.umarket.uz из ТЗ не резолвится — устарел. Живой домен: graphql.uzum.uz.
+ * История (см. README):
+ * - graphql.umarket.uz из ТЗ не резолвится. Живой домен: graphql.uzum.uz.
  * - Нужен Authorization: Bearer <анонимный JWT от "Uzum ID"> + apollographql-client-*,
  *   city-id/latitude/longitude, X-Iid — иначе шлюз отвечает 401 с пустым телом.
- * - Интроспекция схемы НЕ отключена — реальный поиск: `makeSearch(query:
- *   MakeSearchQueryInput!): MakeSearchResult` (не то, что было угадано изначально).
- *   Этот скрипт сам вытаскивает поля MakeSearchQueryInput/MakeSearchResult через
- *   интроспекцию, вместо угадывания вслепую.
+ * - Интроспекция схемы не отключена. Реальный поиск — `makeSearch(query:
+ *   MakeSearchQueryInput!): MakeSearchResult`, товары — в `MakeSearchResult.items: [Item!]`.
+ *   Обязательные поля запроса: showAdultContent (enum), filters ([FilterInput!]!),
+ *   sort (enum), pagination (PaginationInput!).
+ *
+ * Этот скрипт вместо дальнейших ручных догадок САМ:
+ *  1) вытаскивает значения enum'ов ShowAdultContent/Sort и поля PaginationInput;
+ *  2) рекурсивно (с мемоизацией и защитой от циклов) строит selection set для Item,
+ *     пропуская поля, требующие обязательных аргументов, которые мы не можем угадать;
+ *  3) собирает и отправляет реальный makeSearch-запрос, печатает результат.
  *
  * Запуск:
  *   UZUM_BEARER_TOKEN="eyJ..." npx tsx scripts/prototype-uzum.ts ["поисковый запрос"]
@@ -53,11 +59,11 @@ function buildHeaders(): Record<string, string> {
   return headers;
 }
 
-async function post(query: string, variables: Record<string, unknown>, operationName?: string) {
+async function post(query: string, variables: Record<string, unknown> = {}) {
   const res = await fetch(ENDPOINT, {
     method: "POST",
     headers: buildHeaders(),
-    body: JSON.stringify({ query, variables, operationName }),
+    body: JSON.stringify({ query, variables }),
   });
   const status = res.status;
   const bodyText = await res.text();
@@ -70,74 +76,209 @@ async function post(query: string, variables: Record<string, unknown>, operation
   return { status, json };
 }
 
-// Достаёт поля типа/input-типа с разворачиванием NON_NULL/LIST на 3 уровня —
-// этого обычно хватает, чтобы увидеть реальную "форму" поля.
+// ---- Интроспекция типов --------------------------------------------------
+
+interface TypeRefNode {
+  kind: string;
+  name: string | null;
+  ofType: TypeRefNode | null;
+}
+interface FieldArgNode {
+  name: string;
+  type: TypeRefNode;
+}
+interface FieldNode {
+  name: string;
+  type: TypeRefNode;
+  args?: FieldArgNode[];
+}
+interface EnumValueNode {
+  name: string;
+}
+interface TypeInfo {
+  name: string;
+  kind: string;
+  fields: FieldNode[] | null;
+  inputFields: FieldNode[] | null;
+  enumValues: EnumValueNode[] | null;
+}
+
 // Имя типа подставляется прямо в текст запроса (не через $variables) — их бэкенд
 // (судя по формулировке ошибок — graphql-java, не Apollo Server) почему-то не
-// принимал переменные в этом запросе, хотя в других запросах они работали.
+// принимал переменные именно в запросах интроспекции, хотя в обычных запросах
+// переменные работают нормально.
 function typeIntrospectionQuery(typeName: string): string {
   return `
     query TypeInfo {
       __type(name: "${typeName}") {
         name
         kind
-        fields { name type { ...TypeRef } }
+        enumValues { name }
         inputFields { name type { ...TypeRef } }
+        fields {
+          name
+          args { name type { ...TypeRef } }
+          type { ...TypeRef }
+        }
       }
     }
     fragment TypeRef on __Type {
-      name
       kind
+      name
       ofType {
-        name
         kind
+        name
         ofType {
-          name
           kind
-          ofType { name kind }
+          name
+          ofType {
+            kind
+            name
+            ofType { kind name }
+          }
         }
       }
     }
   `;
 }
 
-async function introspectType(name: string) {
-  console.log(`\n=== Схема типа: ${name} ===`);
-  try {
-    const { status, json } = await post(typeIntrospectionQuery(name), {});
-    console.log(`HTTP ${status}`);
-    console.log(JSON.stringify(json, null, 2));
-  } catch (err) {
-    console.log("Ошибка запроса:", err);
+const typeCache = new Map<string, TypeInfo | null>();
+
+async function fetchType(name: string): Promise<TypeInfo | null> {
+  if (typeCache.has(name)) return typeCache.get(name) ?? null;
+  const { json } = await post(typeIntrospectionQuery(name));
+  const type = ((json as any)?.data?.__type ?? null) as TypeInfo | null;
+  typeCache.set(name, type);
+  return type;
+}
+
+// Разворачивает NON_NULL/LIST-обёртки до именованного типа.
+function resolveNamed(node: TypeRefNode): { kind: string; name: string | null; isList: boolean } {
+  let isList = false;
+  let cur: TypeRefNode | null = node;
+  while (cur) {
+    if (cur.kind === "LIST") isList = true;
+    if (cur.name) return { kind: cur.kind, name: cur.name, isList };
+    cur = cur.ofType;
   }
+  return { kind: "UNKNOWN", name: null, isList };
+}
+
+const SCALAR_KINDS = new Set(["SCALAR", "ENUM"]);
+
+// Рекурсивно строит selection set для объектного типа: скаляры/энумы — напрямую,
+// вложенные объекты — рекурсивно (с ограничением глубины и защитой от циклов),
+// поля с обязательными аргументами — пропускаются (мы не можем их угадать).
+async function buildSelectionSet(typeName: string, depth: number, visited: Set<string>): Promise<string> {
+  if (depth < 0 || visited.has(typeName)) return "";
+  const type = await fetchType(typeName);
+  if (!type?.fields) return "";
+
+  const nextVisited = new Set(visited);
+  nextVisited.add(typeName);
+
+  const parts: string[] = [];
+  for (const field of type.fields) {
+    const hasRequiredArg = (field.args ?? []).some((a) => a.type.kind === "NON_NULL");
+    if (hasRequiredArg) continue;
+
+    const resolved = resolveNamed(field.type);
+    if (!resolved.name) continue;
+
+    if (SCALAR_KINDS.has(resolved.kind)) {
+      parts.push(field.name);
+    } else if (resolved.kind === "OBJECT" && depth > 0) {
+      const sub = await buildSelectionSet(resolved.name, depth - 1, nextVisited);
+      if (sub) parts.push(`${field.name} { ${sub} }`);
+    } else if ((resolved.kind === "INTERFACE" || resolved.kind === "UNION") && depth > 0) {
+      parts.push(`${field.name} { __typename }`);
+    }
+  }
+  return parts.join(" ");
+}
+
+function pickEnumValue(type: TypeInfo | null, preferSubstrings: string[]): string | null {
+  const values = type?.enumValues?.map((v) => v.name) ?? [];
+  if (values.length === 0) return null;
+  for (const pref of preferSubstrings) {
+    const hit = values.find((v) => v.toUpperCase().includes(pref));
+    if (hit) return hit;
+  }
+  return values[0];
+}
+
+function graphqlStringLiteral(s: string): string {
+  return JSON.stringify(s);
 }
 
 async function main() {
   console.log(`Эндпоинт: ${ENDPOINT}`);
   console.log(`Поисковый запрос: "${SEARCH_TEXT}"\n`);
 
-  // Уже подтверждено рабочим предыдущим прогоном (200 + реальные данные) — держим
-  // как sanity-check на случай, если токен вдруг протух.
-  console.log("=== Sanity-check: getSuggestions ===");
-  try {
-    const { status, json } = await post(
-      `query Suggestions($q: GetSuggestionsInput!) { getSuggestions(query: $q) { blocks { __typename } } }`,
-      { q: { text: SEARCH_TEXT, textSuggestionsLimit: 1, popularSuggestionsLimit: 1, catalogCardSuggestionsLimit: 0, categorySuggestionsLimit: 1, shopSuggestionsLimit: 1, textInOfferCategorySuggestionsLimit: 1 } }
+  console.log("=== Изучаем ShowAdultContent, Sort, PaginationInput ===");
+  const [showAdultContentType, sortType, paginationType] = await Promise.all([
+    fetchType("ShowAdultContent"),
+    fetchType("Sort"),
+    fetchType("PaginationInput"),
+  ]);
+
+  console.log("ShowAdultContent enumValues:", showAdultContentType?.enumValues?.map((v) => v.name));
+  console.log("Sort enumValues:", sortType?.enumValues?.map((v) => v.name));
+  console.log("PaginationInput inputFields:", paginationType?.inputFields?.map((f) => f.name));
+
+  const showAdultContentValue = pickEnumValue(showAdultContentType, ["HIDE", "DISALLOW", "NOT_SHOW", "FALSE", "NO"]);
+  const sortValue = pickEnumValue(sortType, ["POPULAR", "RELEVANCE", "RATING", "DEFAULT"]);
+
+  const pagination: Record<string, number> = {};
+  for (const f of paginationType?.inputFields ?? []) {
+    const n = f.name.toLowerCase();
+    if (n.includes("size") || n.includes("limit") || n.includes("take") || n.includes("count")) {
+      pagination[f.name] = 10;
+    } else if (n.includes("page") || n.includes("offset") || n.includes("skip")) {
+      pagination[f.name] = 0;
+    }
+  }
+
+  console.log(`\nВыбрано: showAdultContent=${showAdultContentValue}, sort=${sortValue}, pagination=`, pagination);
+
+  console.log("\n=== Строим selection set для Item (рекурсивно, может занять до минуты) ===");
+  const itemSelection = await buildSelectionSet("Item", 4, new Set());
+  console.log("Item selection set:\n" + itemSelection);
+
+  if (!showAdultContentValue || !sortValue || !itemSelection) {
+    console.log(
+      "\n⚠️  Не удалось собрать все части запроса автоматически (см. значения выше). " +
+        "Пришлите весь вывод — доберём вручную."
     );
+    return;
+  }
+
+  const paginationLiteral =
+    "{ " + Object.entries(pagination).map(([k, v]) => `${k}: ${v}`).join(", ") + " }";
+  const queryLiteral =
+    `{ text: ${graphqlStringLiteral(SEARCH_TEXT)}, showAdultContent: ${showAdultContentValue}, ` +
+    `filters: [], sort: ${sortValue}, pagination: ${paginationLiteral} }`;
+
+  const searchQuery = `
+    query Search {
+      makeSearch(query: ${queryLiteral}) {
+        total
+        items { ${itemSelection} }
+      }
+    }
+  `;
+
+  console.log("\n=== Отправляем реальный makeSearch ===");
+  console.log(searchQuery);
+  try {
+    const { status, json } = await post(searchQuery);
     console.log(`HTTP ${status}`);
     console.log(JSON.stringify(json, null, 2));
   } catch (err) {
     console.log("Ошибка запроса:", err);
   }
 
-  // Главное: реальная форма запроса поиска товаров.
-  await introspectType("MakeSearchQueryInput");
-  await introspectType("MakeSearchResult");
-
-  console.log(
-    "\nГотово. Пришлите вывод целиком (особенно два последних блока про MakeSearchQueryInput " +
-      "и MakeSearchResult) — по ним соберём правильный запрос makeSearch без дальнейших догадок."
-  );
+  console.log("\nГотово. Пришлите вывод целиком — особенно блок 'Отправляем реальный makeSearch'.");
 }
 
 main();
