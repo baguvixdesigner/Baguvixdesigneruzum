@@ -1,0 +1,160 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ChinaSource {
+  TAOBAO
+  ALIBABA_1688
+}
+
+enum SourceScope {
+  TAOBAO
+  ALIBABA_1688
+  BOTH
+}
+
+enum NoveltyLabel {
+  GREEN
+  YELLOW
+  RED
+}
+
+enum SuggestionStatus {
+  NEW
+  ADDED
+  REJECTED
+}
+
+enum WalletTxType {
+  TOPUP
+  QUERY_CHARGE
+}
+
+enum TopUpStatus {
+  AWAITING_SCREENSHOT
+  AWAITING_ADMIN_CONFIRMATION
+  CONFIRMED
+  REJECTED
+}
+
+enum Language {
+  ru
+  uz
+}
+
+model Category {
+  id              String   @id @default(cuid())
+  name            String
+  nameUz          String?
+  parentGroup     String
+  parentGroupUz   String?
+  uzumCategoryId  String?
+  chinaSearchTerms String[]
+  active          Boolean  @default(true)
+  sortOrder       Int      @default(0)
+
+  snapshots   ProductSnapshot[]
+  requestLogs RequestLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CategorySuggestion {
+  id             String            @id @default(cuid())
+  telegramUserId BigInt
+  suggestedText  String
+  status         SuggestionStatus  @default(NEW)
+  createdAt      DateTime          @default(now())
+}
+
+model ExchangeRate {
+  id        String   @id @default(cuid())
+  currency  String // "CNY"
+  rateToUzs Float
+  fetchedAt DateTime @default(now())
+
+  @@index([currency, fetchedAt])
+}
+
+model ProductSnapshot {
+  id             String       @id @default(cuid())
+  categoryId     String
+  category       Category     @relation(fields: [categoryId], references: [id])
+  source         ChinaSource
+  sourceProductId String
+
+  title             String
+  titleTranslatedRu String?
+  imageUrl          String?
+
+  priceCny       Float
+  priceUzsAtFetch Float
+
+  salesSignal Float @default(0)
+
+  sourceUrl String
+
+  uzumMatchCount Int   @default(0)
+  uzumOrdersSum  Int   @default(0)
+  noveltyLabel   NoveltyLabel @default(RED)
+
+  // порядок ранжирования пайплайна (0 = лучший результат) — используется для сортировки выдачи
+  rank Int @default(0)
+
+  fetchedAt DateTime @default(now())
+
+  @@index([categoryId, fetchedAt])
+  @@index([categoryId, source])
+}
+
+model TelegramUser {
+  id               String   @id @default(cuid())
+  telegramId       BigInt   @unique
+  username         String?
+  language         Language @default(ru)
+  walletBalanceSum Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  walletTransactions WalletTransaction[]
+  topUpRequests      TopUpRequest[]
+  requestLogs        RequestLog[]
+}
+
+model WalletTransaction {
+  id              String       @id @default(cuid())
+  userId          String
+  user            TelegramUser @relation(fields: [userId], references: [id])
+  type            WalletTxType
+  amountSum       Int
+  createdAt       DateTime     @default(now())
+  relatedRequestId String?
+}
+
+model TopUpRequest {
+  id                 String      @id @default(cuid())
+  userId             String
+  user               TelegramUser @relation(fields: [userId], references: [id])
+  requestedAmountSum Int
+  status             TopUpStatus @default(AWAITING_SCREENSHOT)
+  screenshotFileId   String?
+  createdAt          DateTime    @default(now())
+  confirmedAt        DateTime?
+}
+
+model RequestLog {
+  id             String      @id @default(cuid())
+  userId         String
+  user           TelegramUser @relation(fields: [userId], references: [id])
+  categoryId     String
+  category       Category    @relation(fields: [categoryId], references: [id])
+  sourceScope    SourceScope
+  batchNumber    Int         @default(1)
+  requestedAt    DateTime    @default(now())
+  servedFromCache Boolean    @default(false)
+}
