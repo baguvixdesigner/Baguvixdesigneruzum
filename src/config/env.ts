@@ -29,8 +29,10 @@ export const env = {
   oxylabsUsername: optional("OXYLABS_USERNAME"),
   oxylabsPassword: optional("OXYLABS_PASSWORD"),
 
-  uzumGraphqlUrl: optional("UZUM_GRAPHQL_URL", "https://graphql.umarket.uz/"),
-  uzumApiUrl: optional("UZUM_API_URL", "https://api.umarket.uz/"),
+  // graphql.umarket.uz / api.umarket.uz из исходного ТЗ больше не резолвятся —
+  // живой бренд-домен подтверждён вручную: graphql.uzum.uz / api.uzum.uz
+  uzumGraphqlUrl: optional("UZUM_GRAPHQL_URL", "https://graphql.uzum.uz/"),
+  uzumApiUrl: optional("UZUM_API_URL", "https://api.uzum.uz/"),
 
   apifyToken: optional("APIFY_TOKEN"),
   apifyUzumActorId: optional("APIFY_UZUM_ACTOR_ID"),

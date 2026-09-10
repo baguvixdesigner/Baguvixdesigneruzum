@@ -1,4 +1,5 @@
 import axios from "axios";
+import { randomUUID } from "node:crypto";
 import { env } from "../config/env";
 import { logger } from "../utils/logger";
 
@@ -8,13 +9,20 @@ export interface UzumMatchResult {
 }
 
 /**
- * Поиск по ключевым словам через внутренний GraphQL Uzum (graphql.umarket.uz).
+ * Поиск по ключевым словам через внутренний GraphQL Uzum (graphql.uzum.uz).
  * Это неофициальный эндпоинт (см. раздел 5.1 ТЗ) — запрос ниже основан на схеме,
  * которой пользуются открытые community-проекты для поиска товаров. При смене
  * фронтенда Uzum схема может измениться — тогда правится только этот файл.
  *
+ * Домен из исходного ТЗ (graphql.umarket.uz) больше не резолвится — заменён на
+ * актуальный graphql.uzum.uz (см. scripts/discover-uzum-api.ts). Без заголовка
+ * X-Iid эндпоинт отвечает 401 — используем стабильный per-process идентификатор,
+ * как это делают клиентские приложения. Точный набор нужных заголовков и полей
+ * ответа — подтвердить через scripts/prototype-uzum.ts перед продакшеном.
+ *
  * Резерв при нестабильности: переключение на платный Apify Uzum Scraper (см. searchUzumViaApify).
  */
+const DEVICE_IID = randomUUID();
 const SEARCH_QUERY = `
   query SearchProducts($text: String!, $take: Int!) {
     makeSearch(text: $text, options: { pagination: { take: $take, skip: 0 } }) {
@@ -34,7 +42,12 @@ export async function searchUzumMatches(keyword: string, take = 40): Promise<Uzu
       { query: SEARCH_QUERY, variables: { text: keyword, take } },
       {
         timeout: 15_000,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "Accept-Language": "ru-RU",
+          "X-Iid": DEVICE_IID,
+        },
       }
     );
 
