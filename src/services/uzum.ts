@@ -10,37 +10,55 @@ export interface UzumMatchResult {
 
 /**
  * Поиск по ключевым словам через внутренний GraphQL Uzum (graphql.uzum.uz).
- * Это неофициальный эндпоинт (см. раздел 5.1 ТЗ) — запрос ниже основан на схеме,
- * которой пользуются открытые community-проекты для поиска товаров. При смене
- * фронтенда Uzum схема может измениться — тогда правится только этот файл.
+ * Это неофициальный эндпоинт (см. раздел 5.1 ТЗ). Домен из исходного ТЗ
+ * (graphql.umarket.uz) больше не резолвится — заменён на актуальный graphql.uzum.uz.
  *
- * Домен из исходного ТЗ (graphql.umarket.uz) больше не резолвится — заменён на
- * актуальный graphql.uzum.uz. Перед GraphQL стоит шлюз, который без корректных
- * заголовков отвечает 401 с пустым телом (не ошибка GraphQL-сервера). Реальный
- * набор заголовков подтверждён через DevTools (Network → Copy as cURL на uzum.uz):
- * нужен Authorization: Bearer <анонимный JWT от "Uzum ID">, apollographql-client-*,
- * city-id/latitude/longitude, X-Iid. Токен живёт ~3 часа и пока подставляется вручную
- * через UZUM_BEARER_TOKEN — программный способ его получать ещё предстоит найти
- * (см. README, раздел про открытые вопросы). Без него запросы будут падать в 401,
- * и пайплайн уйдёт в резерв (Apify) или в нейтральный noveltyLabel.
+ * Перед GraphQL стоит шлюз (Apollo Federation — видно по subrequest-ошибкам от
+ * отдельных сервисов вроде "ad-market"), который без корректных заголовков отвечает
+ * 401 с пустым телом (не ошибка GraphQL-сервера). Нужен Authorization: Bearer
+ * <анонимный JWT от "Uzum ID">, apollographql-client-*, city-id/latitude/longitude,
+ * X-Iid — подтверждено через DevTools (Network → Copy as cURL на uzum.uz) и живым
+ * прогоном запроса ниже. Токен живёт ~3 часа и пока подставляется вручную через
+ * UZUM_BEARER_TOKEN — программный способ его получать ещё предстоит найти (см.
+ * README). Без него запросы падают в 401, и пайплайн уходит в резерв (Apify) или
+ * в нейтральный noveltyLabel.
  *
- * Точное имя запроса/полей для поиска товаров (не автодополнения) — тоже ещё не
- * подтверждено, см. scripts/prototype-uzum.ts.
+ * Запрос и структура ответа подтверждены живым прогоном через интроспекцию схемы
+ * (scripts/prototype-uzum.ts, не отключена на их стороне) — makeSearch(query:
+ * MakeSearchQueryInput!): MakeSearchResult, товары в MakeSearchResult.items,
+ * карточка — union CatalogCard (ProductCard | SkuCard | SkuGroupCard), у каждого
+ * варианта есть ordersQuantity — то самое число заказов из раздела 4 ТЗ.
+ * showAdultContent/sort — литералы enum'ов, не переменные (их бэкенд что-то
+ * странное делает с $variables именно в интроспекции — вживую makeSearch
+ * с инлайн-литералами отработал стабильно, поэтому оставлено так и здесь).
  *
  * Резерв при нестабильности: переключение на платный Apify Uzum Scraper (см. searchUzumViaApify).
  */
 const DEVICE_IID = randomUUID();
-const SEARCH_QUERY = `
-  query SearchProducts($text: String!, $take: Int!) {
-    makeSearch(text: $text, options: { pagination: { take: $take, skip: 0 } }) {
-      total
-      products {
-        id
-        orders
+
+function searchQuery(keyword: string, take: number): string {
+  const text = JSON.stringify(keyword);
+  return `
+    query Search {
+      makeSearch(query: {
+        text: ${text},
+        showAdultContent: FALSE,
+        filters: [],
+        sort: BY_RELEVANCE_DESC,
+        pagination: { offset: 0, limit: ${take} }
+      }) {
+        total
+        items {
+          catalogCard {
+            ... on ProductCard { ordersQuantity }
+            ... on SkuCard { ordersQuantity }
+            ... on SkuGroupCard { ordersQuantity }
+          }
+        }
       }
     }
-  }
-`;
+  `;
+}
 
 function uzumHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
@@ -71,7 +89,7 @@ export async function searchUzumMatches(keyword: string, take = 40): Promise<Uzu
   try {
     const { data } = await axios.post(
       env.uzumGraphqlUrl,
-      { query: SEARCH_QUERY, variables: { text: keyword, take } },
+      { query: searchQuery(keyword, take), variables: {} },
       { timeout: 15_000, headers: uzumHeaders() }
     );
 
@@ -81,11 +99,11 @@ export async function searchUzumMatches(keyword: string, take = 40): Promise<Uzu
       return await searchUzumViaApify(keyword);
     }
 
-    const products: Array<{ orders?: number }> = search.products ?? [];
-    const ordersSum = products.reduce((sum, p) => sum + (p.orders ?? 0), 0);
+    const items: Array<{ catalogCard?: { ordersQuantity?: number } }> = search.items ?? [];
+    const ordersSum = items.reduce((sum, item) => sum + (item.catalogCard?.ordersQuantity ?? 0), 0);
 
     return {
-      matchCount: Number(search.total ?? products.length ?? 0),
+      matchCount: Number(search.total ?? items.length ?? 0),
       ordersSum,
     };
   } catch (err) {
