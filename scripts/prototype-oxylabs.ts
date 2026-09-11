@@ -50,6 +50,10 @@ async function main() {
     // Сначала смотрим на сырой HTML, чтобы понять, разумно ли парсить самим.
     render: "html", // Taobao/1688 сильно на JS, без рендера может прийти пустая оболочка
     geo_location: "China",
+    // Первая попытка (без этого) один раз поймала полную выдачу (400КБ), другой раз —
+    // только SPA-оболочку без данных (35КБ, товары подгружаются отдельным JS-запросом
+    // уже после начального рендера). Явно ждём перед снимком DOM.
+    browser_instructions: [{ type: "wait", wait_time_s: 6 }],
   };
 
   console.log("Запрос к Oxylabs:", JSON.stringify(payload, null, 2));
@@ -75,7 +79,7 @@ async function main() {
 
     if (typeof result.content === "string") {
       const html = result.content;
-      const outFile = `oxylabs-${SITE}.html`;
+      const outFile = `oxylabs-${SITE}-${Date.now()}.html`;
       writeFileSync(outFile, html, "utf-8");
       console.log(`\ncontent — строка (HTML), ${html.length} символов, сохранено в ${outFile}\n`);
 
