@@ -116,14 +116,14 @@ function graphqlStringLiteral(s: string): string {
   return JSON.stringify(s);
 }
 
-function searchQuery(keyword: string, take: number): string {
+function searchQuery(keyword: string, take: number, sort: string): string {
   return `
     query Search {
       makeSearch(query: {
         text: ${graphqlStringLiteral(keyword)},
         showAdultContent: FALSE,
         filters: [],
-        sort: BY_RELEVANCE_DESC,
+        sort: ${sort},
         pagination: { offset: 0, limit: ${take} }
       }) {
         total
@@ -135,6 +135,7 @@ function searchQuery(keyword: string, take: number): string {
             discovery {
               title
               priceBlock { sellPrice { amount } }
+              feedback { quantity rating }
             }
           }
         }
@@ -143,32 +144,48 @@ function searchQuery(keyword: string, take: number): string {
   `;
 }
 
+async function runSearch(token: string, sort: string) {
+  console.log(`\n=== makeSearch, sort: ${sort} ===`);
+  const { data, status } = await axios.post(
+    GRAPHQL_ENDPOINT,
+    { query: searchQuery(SEARCH_TEXT, 10, sort), variables: {} },
+    { headers: buildHeaders(token), timeout: 15_000, validateStatus: () => true }
+  );
+  console.log(`HTTP ${status}`);
+
+  const total = data?.data?.makeSearch?.total;
+  const items = data?.data?.makeSearch?.items ?? [];
+  console.log(`total=${total}`);
+  for (const item of items) {
+    const c = item?.catalogCard;
+    console.log(
+      `  orders=${c?.ordersQuantity ?? "?"}  отзывы=${c?.discovery?.feedback?.quantity ?? "?"}  ` +
+        `рейтинг=${c?.discovery?.feedback?.rating ?? "?"}  цена=${c?.discovery?.priceBlock?.sellPrice?.amount ?? "?"}  ` +
+        `"${c?.discovery?.title ?? "?"}"`
+    );
+  }
+  if (status !== 200) console.log(JSON.stringify(data, null, 2));
+  return { total, items };
+}
+
 async function main() {
   console.log(`Поисковый запрос: "${SEARCH_TEXT}"\n`);
 
   const token = await getFreshToken();
 
-  console.log("=== Отправляем makeSearch ===");
-  const { data, status } = await axios.post(
-    GRAPHQL_ENDPOINT,
-    { query: searchQuery(SEARCH_TEXT, 10), variables: {} },
-    { headers: buildHeaders(token), timeout: 15_000, validateStatus: () => true }
-  );
-  console.log(`HTTP ${status}`);
-  console.log(JSON.stringify(data, null, 2));
+  // Сортировка по релевантности — то, что реально увидит обычный пользователь
+  // (и что мы используем в пайплайне).
+  await runSearch(token, "BY_RELEVANCE_DESC");
 
-  const total = data?.data?.makeSearch?.total;
-  const items = data?.data?.makeSearch?.items ?? [];
-  const ordersSum = items.reduce(
-    (sum: number, item: any) => sum + (item?.catalogCard?.ordersQuantity ?? 0),
-    0
-  );
+  // Сортировка по числу заказов — если ordersQuantity рабочее поле, топ здесь
+  // должен показать ненулевые (и большие) значения. Если снова везде 0 —
+  // значит поле для этого запроса не заполняется вообще, и нужно переключиться
+  // на feedback.quantity (число отзывов) как прокси-сигнал вместо заказов.
+  await runSearch(token, "BY_ORDERS_NUMBER_DESC");
 
-  console.log(`\nИтог: total=${total}, сумма ordersQuantity по первым ${items.length} товарам=${ordersSum}`);
   console.log(
-    total !== undefined
-      ? "✅ Токен получен автоматически, поиск отработал полностью самостоятельно."
-      : "⚠️  Что-то пошло не так — смотрите ответ выше."
+    "\nГотово. Пришлите вывод целиком — особенно второй блок (BY_ORDERS_NUMBER_DESC): " +
+      "если там тоже везде orders=0, переключаем сигнал на число отзывов."
   );
 }
 
