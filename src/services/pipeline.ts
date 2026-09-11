@@ -2,7 +2,7 @@ import { prisma } from "../db/prisma";
 import { env } from "../config/env";
 import { logger } from "../utils/logger";
 import { getCnyToUzsRate } from "./exchangeRate";
-import { searchChinaSource, ChinaCandidate } from "./oxylabs";
+import { searchChinaSource, ChinaCandidate } from "./apifyChina";
 import { searchUzumMatches } from "./uzum";
 import { translateToRussian } from "./translate";
 import type { Category, ChinaSource, NoveltyLabel } from "@prisma/client";

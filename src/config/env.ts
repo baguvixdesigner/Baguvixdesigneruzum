@@ -26,9 +26,6 @@ export const env = {
 
   databaseUrl: required("DATABASE_URL"),
 
-  oxylabsUsername: optional("OXYLABS_USERNAME"),
-  oxylabsPassword: optional("OXYLABS_PASSWORD"),
-
   // graphql.umarket.uz / api.umarket.uz из исходного ТЗ больше не резолвятся —
   // живой бренд-домен подтверждён вручную: graphql.uzum.uz / api.uzum.uz
   uzumGraphqlUrl: optional("UZUM_GRAPHQL_URL", "https://graphql.uzum.uz/"),
@@ -42,8 +39,13 @@ export const env = {
   uzumCityLat: optional("UZUM_CITY_LAT", "41.379112"),
   uzumCityLon: optional("UZUM_CITY_LON", "69.29944"),
 
+  // Taobao/1688: Oxylabs не даёт структурированных данных по этим сайтам (только
+  // сырой HTML через generic "universal" источник, ненадёжно для Taobao даже с
+  // JS-рендером — см. README) — вместо этого используются готовые Apify-акторы.
   apifyToken: optional("APIFY_TOKEN"),
   apifyUzumActorId: optional("APIFY_UZUM_ACTOR_ID"),
+  apifyTaobaoActorId: optional("APIFY_TAOBAO_ACTOR_ID", "zen-studio~taobao-search-scraper"),
+  apify1688ActorId: optional("APIFY_1688_ACTOR_ID", "zen-studio~1688-wholesale-scraper"),
 
   cbuRatesUrl: optional("CBU_RATES_URL", "https://cbu.uz/ru/arkhiv-kursov-valyut/json/"),
 
