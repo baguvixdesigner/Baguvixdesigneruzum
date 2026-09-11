@@ -17,6 +17,7 @@
  */
 
 import axios from "axios";
+import { writeFileSync } from "node:fs";
 
 const USERNAME = process.env.OXYLABS_USERNAME;
 const PASSWORD = process.env.OXYLABS_PASSWORD;
@@ -73,9 +74,42 @@ async function main() {
     console.log("Тип content:", typeof result.content);
 
     if (typeof result.content === "string") {
-      console.log("\ncontent — строка (сырой HTML/markdown), первые 2000 символов:");
-      console.log(result.content.slice(0, 2000));
-      console.log(`\n... (всего ${result.content.length} символов)`);
+      const html = result.content;
+      const outFile = `oxylabs-${SITE}.html`;
+      writeFileSync(outFile, html, "utf-8");
+      console.log(`\ncontent — строка (HTML), ${html.length} символов, сохранено в ${outFile}\n`);
+
+      // Признаки антибот-блокировки/капчи — если сработают, значит страница не
+      // настоящая выдача, а заглушка.
+      const blockMarkers = ["验证码", "异常访问", "人机验证", "captcha", "访问过于频繁"];
+      const foundBlocks = blockMarkers.filter((m) => html.includes(m));
+      console.log(
+        foundBlocks.length
+          ? `⚠️  Похоже на антибот-страницу, найдены маркеры: ${foundBlocks.join(", ")}`
+          : "✅ Признаков антибот-блокировки не найдено."
+      );
+
+      // Известные маркеры данных товаров на Taobao/1688 — ищем и показываем
+      // контекст вокруг первого совпадения, чтобы понять реальную структуру.
+      const dataMarkers = [
+        "g_page_config",
+        "__INITIAL_DATA__",
+        "view_sales",
+        "raw_title",
+        "auctions",
+        "\"itemId\"",
+        "\"price\"",
+      ];
+      for (const marker of dataMarkers) {
+        const idx = html.indexOf(marker);
+        if (idx === -1) {
+          console.log(`\n❌ Маркер "${marker}" не найден`);
+          continue;
+        }
+        const start = Math.max(0, idx - 100);
+        const snippet = html.slice(start, idx + 900);
+        console.log(`\n✅ Маркер "${marker}" найден на позиции ${idx}, контекст:\n${snippet}`);
+      }
     } else {
       console.log("\ncontent — объект (распарсенный JSON):");
       console.log(JSON.stringify(result.content, null, 2).slice(0, 4000));
