@@ -75,6 +75,24 @@ export async function searchChinaSource(
   }
 }
 
+/**
+ * Продажи в китайских карточках часто приходят человекочитаемой строкой с
+ * иероглифом-множителем, а не числом — например "1万+" (10 000+), "3.5万"
+ * (35 000). Подтверждено живым прогоном Taobao-актора: "sales"/"totalSold"
+ * там были 0, а реальный сигнал лежал именно в "salesSignal" в таком формате.
+ */
+function parseChineseCount(raw: unknown): number {
+  if (typeof raw === "number") return raw;
+  if (typeof raw !== "string") return 0;
+  const match = raw.replace(/\+/g, "").trim().match(/^([\d.]+)\s*(万|亿)?/);
+  if (!match) return 0;
+  const num = Number.parseFloat(match[1]);
+  if (!Number.isFinite(num)) return 0;
+  if (match[2] === "万") return Math.round(num * 10_000);
+  if (match[2] === "亿") return Math.round(num * 100_000_000);
+  return Math.round(num);
+}
+
 function parseApifyResults(source: ChinaSourceKey, items: any[]): ChinaCandidate[] {
   const out: ChinaCandidate[] = [];
 
@@ -88,15 +106,21 @@ function parseApifyResults(source: ChinaSourceKey, items: any[]): ChinaCandidate
       item.price ?? item.priceCny ?? item.currentPrice ?? item.minPrice ?? item.priceRange?.min ?? "0"
     );
 
+    const salesSignal =
+      parseChineseCount(item.salesSignal) ||
+      parseChineseCount(item.search?.orderPayUV) ||
+      parseChineseCount(item.totalSold) ||
+      parseChineseCount(item.sales) ||
+      0;
+
     out.push({
       source,
       sourceProductId: productId,
       title,
-      imageUrl: item.image ?? item.imageUrl ?? item.mainImage ?? item.gallery?.[0] ?? undefined,
+      imageUrl: item.mainPictureUrl ?? item.image ?? item.imageUrl ?? item.gallery?.[0] ?? undefined,
       priceCny: Number.isFinite(price) ? price : 0,
       sourceUrl: url,
-      salesSignal:
-        Number.parseFloat(item.sales ?? item.salesCount ?? item.soldCount ?? item.monthSold ?? "0") || 0,
+      salesSignal,
     });
   }
 
