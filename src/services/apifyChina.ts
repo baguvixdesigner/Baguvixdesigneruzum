@@ -27,12 +27,16 @@ export interface ChinaCandidate {
  * умеющие обходить их защиту и отдающие готовый структурированный JSON по
  * ключевому слову. Подробности решения — см. README.
  *
- * Актуальные акторы (проверить/сменить при необходимости через .env):
- *  - Taobao: zen-studio/taobao-search-scraper — подтверждённый параметр
- *    "keyword", опционально maxItems/sort/enrichWithDetails.
- *  - 1688: zen-studio/1688-wholesale-scraper — точное имя параметра поиска
- *    по ключевому слову ЕЩЁ НЕ подтверждено живым прогоном, см.
- *    scripts/prototype-apify-china.ts.
+ * Акторы и формат ответа подтверждены живыми прогонами обоих (см.
+ * scripts/prototype-apify-china.ts):
+ *  - Taobao: zen-studio/taobao-search-scraper — { keyword, maxItems (>= 10) }.
+ *    Реальные поля: itemId/title/url/mainPictureUrl, price — строка ("139.00"),
+ *    salesSignal — человекочитаемая строка вида "1万+" (sales/totalSold часто 0
+ *    даже на обогащённых товарах).
+ *  - 1688: zen-studio/1688-wholesale-scraper — { keyword, maxItems }. Реальные
+ *    поля: offerId/title/detailUrl/images[], price — объект {min, max, currency}
+ *    (диапазон оптовых цен), saledCount/orderCount/recentSoldCount — уже готовые
+ *    числа, парсинг иероглифов не нужен.
  */
 const ACTOR_ID: Record<ChinaSourceKey, string> = {
   TAOBAO: env.apifyTaobaoActorId,
@@ -93,36 +97,78 @@ function parseChineseCount(raw: unknown): number {
   return Math.round(num);
 }
 
-function parseApifyResults(source: ChinaSourceKey, items: any[]): ChinaCandidate[] {
-  const out: ChinaCandidate[] = [];
-
-  for (const item of items) {
-    const productId = String(item.itemId ?? item.id ?? item.offerId ?? item.productId ?? "");
-    const title = String(item.title ?? item.titleOriginal ?? item.name ?? "").trim();
-    const url = String(item.url ?? item.itemUrl ?? item.detailUrl ?? item.link ?? "");
-    if (!productId || !title || !url) continue;
-
-    const price = Number.parseFloat(
-      item.price ?? item.priceCny ?? item.currentPrice ?? item.minPrice ?? item.priceRange?.min ?? "0"
-    );
-
-    const salesSignal =
-      parseChineseCount(item.salesSignal) ||
-      parseChineseCount(item.search?.orderPayUV) ||
-      parseChineseCount(item.totalSold) ||
-      parseChineseCount(item.sales) ||
-      0;
-
-    out.push({
-      source,
-      sourceProductId: productId,
-      title,
-      imageUrl: item.mainPictureUrl ?? item.image ?? item.imageUrl ?? item.gallery?.[0] ?? undefined,
-      priceCny: Number.isFinite(price) ? price : 0,
-      sourceUrl: url,
-      salesSignal,
-    });
+/**
+ * Taobao: price — строка ("139.00"). 1688: price — объект {min, max, currency}
+ * (диапазон оптовых цен). Подтверждено живыми прогонами обоих акторов.
+ */
+function extractPrice(item: any): number {
+  if (typeof item.price === "number") return item.price;
+  if (typeof item.price === "string") return Number.parseFloat(item.price) || 0;
+  if (item.price && typeof item.price === "object") {
+    const v = item.price.min ?? item.price.max;
+    return Number.parseFloat(v) || 0;
   }
+  return Number.parseFloat(item.priceCny ?? item.currentPrice ?? item.minPrice ?? "0") || 0;
+}
 
+function parseTaobaoItem(item: any): ChinaCandidate | null {
+  const productId = String(item.itemId ?? "");
+  const title = String(item.title ?? "").trim();
+  const url = String(item.url ?? "");
+  if (!productId || !title || !url) return null;
+
+  // sales/totalSold часто приходят 0 даже на обогащённых товарах — реальный
+  // сигнал лежит в salesSignal как человекочитаемая строка вида "1万+".
+  const salesSignal =
+    parseChineseCount(item.salesSignal) ||
+    parseChineseCount(item.search?.orderPayUV) ||
+    parseChineseCount(item.totalSold) ||
+    parseChineseCount(item.sales) ||
+    0;
+
+  return {
+    source: "TAOBAO",
+    sourceProductId: productId,
+    title,
+    imageUrl: item.mainPictureUrl ?? undefined,
+    priceCny: extractPrice(item),
+    sourceUrl: url,
+    salesSignal,
+  };
+}
+
+function parse1688Item(item: any): ChinaCandidate | null {
+  const productId = String(item.offerId ?? "");
+  const title = String(item.title ?? "").trim();
+  const url = String(item.detailUrl ?? "");
+  if (!productId || !title || !url) return null;
+
+  // В отличие от Taobao, тут почти везде уже готовые числа.
+  const salesSignal =
+    item.saledCount ??
+    item.orderCount ??
+    item.recentSoldCount ??
+    parseChineseCount(item.soldDisplay) ??
+    parseChineseCount(item.saledCountStr) ??
+    0;
+
+  return {
+    source: "ALIBABA_1688",
+    sourceProductId: productId,
+    title,
+    imageUrl: Array.isArray(item.images) ? item.images[0] : undefined,
+    priceCny: extractPrice(item),
+    sourceUrl: url,
+    salesSignal: Number(salesSignal) || 0,
+  };
+}
+
+function parseApifyResults(source: ChinaSourceKey, items: any[]): ChinaCandidate[] {
+  const parse = source === "TAOBAO" ? parseTaobaoItem : parse1688Item;
+  const out: ChinaCandidate[] = [];
+  for (const item of items) {
+    const candidate = parse(item);
+    if (candidate) out.push(candidate);
+  }
   return out;
 }
