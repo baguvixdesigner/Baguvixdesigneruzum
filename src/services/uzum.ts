@@ -2,6 +2,7 @@ import axios from "axios";
 import { randomUUID } from "node:crypto";
 import { env } from "../config/env";
 import { logger } from "../utils/logger";
+import { getUzumBearerToken } from "./uzumAuth";
 
 export interface UzumMatchResult {
   matchCount: number;
@@ -18,10 +19,11 @@ export interface UzumMatchResult {
  * 401 с пустым телом (не ошибка GraphQL-сервера). Нужен Authorization: Bearer
  * <анонимный JWT от "Uzum ID">, apollographql-client-*, city-id/latitude/longitude,
  * X-Iid — подтверждено через DevTools (Network → Copy as cURL на uzum.uz) и живым
- * прогоном запроса ниже. Токен живёт ~3 часа и пока подставляется вручную через
- * UZUM_BEARER_TOKEN — программный способ его получать ещё предстоит найти (см.
- * README). Без него запросы падают в 401, и пайплайн уходит в резерв (Apify) или
- * в нейтральный noveltyLabel.
+ * прогоном запроса ниже. Токен живёт ~3 часа и получается автоматически через
+ * getUzumBearerToken() (см. uzumAuth.ts) — воспроизводит флоу их сайта: GET
+ * uzum.uz (кука _yasc от их балансировщика) → POST id.uzum.uz/api/auth/token
+ * (Set-Cookie: access_token). UZUM_BEARER_TOKEN в .env остаётся ручным оверрайдом
+ * для отладки.
  *
  * Запрос и структура ответа подтверждены живым прогоном через интроспекцию схемы
  * (scripts/prototype-uzum.ts, не отключена на их стороне) — makeSearch(query:
@@ -60,8 +62,8 @@ function searchQuery(keyword: string, take: number): string {
   `;
 }
 
-function uzumHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
+function uzumHeaders(token: string): Record<string, string> {
+  return {
     "Content-Type": "application/json",
     Accept: "*/*",
     "Accept-Language": "ru-RU",
@@ -75,14 +77,14 @@ function uzumHeaders(): Record<string, string> {
     Origin: "https://uzum.uz",
     Referer: "https://uzum.uz/",
     "X-Iid": DEVICE_IID,
+    Authorization: `Bearer ${token}`,
   };
-  if (env.uzumBearerToken) headers.Authorization = `Bearer ${env.uzumBearerToken}`;
-  return headers;
 }
 
 export async function searchUzumMatches(keyword: string, take = 40): Promise<UzumMatchResult> {
-  if (!env.uzumBearerToken) {
-    logger.warn("UZUM_BEARER_TOKEN не задан — GraphQL Uzum вернёт 401, уходим в резерв");
+  const token = await getUzumBearerToken();
+  if (!token) {
+    logger.warn("Не удалось получить Bearer-токен Uzum — уходим в резерв");
     return await searchUzumViaApify(keyword);
   }
 
@@ -90,7 +92,7 @@ export async function searchUzumMatches(keyword: string, take = 40): Promise<Uzu
     const { data } = await axios.post(
       env.uzumGraphqlUrl,
       { query: searchQuery(keyword, take), variables: {} },
-      { timeout: 15_000, headers: uzumHeaders() }
+      { timeout: 15_000, headers: uzumHeaders(token) }
     );
 
     const search = data?.data?.makeSearch;

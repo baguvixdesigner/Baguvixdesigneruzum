@@ -34,8 +34,8 @@ export const env = {
   uzumGraphqlUrl: optional("UZUM_GRAPHQL_URL", "https://graphql.uzum.uz/"),
   uzumApiUrl: optional("UZUM_API_URL", "https://api.uzum.uz/"),
   // Шлюз перед GraphQL требует Authorization: Bearer <анонимный JWT от "Uzum ID">
-  // (без него — 401 с пустым телом). Токен живёт ~3 часа, программный способ его
-  // получать ещё не найден (см. README) — временно берётся вручную из DevTools.
+  // (без него — 401 с пустым телом). Токен получается и кэшируется автоматически
+  // (src/services/uzumAuth.ts). Эта переменная — ручной оверрайд для отладки.
   uzumBearerToken: optional("UZUM_BEARER_TOKEN"),
   uzumClientVersion: optional("UZUM_CLIENT_VERSION", "1.63.2"),
   uzumCityId: optional("UZUM_CITY_ID", "1"),
