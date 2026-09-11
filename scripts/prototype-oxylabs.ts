@@ -44,7 +44,9 @@ async function main() {
   const payload = {
     source: "universal",
     url,
-    parse: true,
+    // parse: true убран — для Taobao/1688 (не "именной" источник Oxylabs) он требует
+    // ещё parser_type/parsing_instructions ("Unknown Parser url is allowed only with...").
+    // Сначала смотрим на сырой HTML, чтобы понять, разумно ли парсить самим.
     render: "html", // Taobao/1688 сильно на JS, без рендера может прийти пустая оболочка
     geo_location: "China",
   };
