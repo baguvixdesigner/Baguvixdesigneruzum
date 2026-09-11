@@ -54,7 +54,9 @@ export async function searchChinaSource(
   }
 
   const actorId = ACTOR_ID[source];
-  const input = { keyword: searchTerm, maxItems: limit };
+  // Taobao-актор требует maxItems >= 10 (проверено живым прогоном) — подстраховка
+  // на случай, если когда-нибудь вызовут с меньшим лимитом.
+  const input = { keyword: searchTerm, maxItems: Math.max(limit, 10) };
 
   try {
     const { data } = await axios.post(

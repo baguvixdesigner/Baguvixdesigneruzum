@@ -32,7 +32,7 @@ if (!TOKEN) {
 
 async function main() {
   const actorId = ACTOR_ID[SITE];
-  const input = { keyword: QUERY, maxItems: 5 };
+  const input = { keyword: QUERY, maxItems: 10 }; // maxItems must be >= 10 (актор так требует)
 
   console.log(`Сайт: ${SITE}`);
   console.log(`Актор: ${actorId}`);
