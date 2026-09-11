@@ -7,8 +7,11 @@ async function main() {
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
-  await bot.launch();
+  // bot.launch() не резолвится, пока бот работает (это его нормальный режим
+  // в long-polling) — не ждём его, иначе следующая строка никогда не выполнится.
+  const launching = bot.launch();
   logger.info("Бот запущен");
+  await launching;
 }
 
 main().catch((err) => {
