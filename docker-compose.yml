@@ -7,7 +7,10 @@ services:
       POSTGRES_PASSWORD: uzum_bot
       POSTGRES_DB: uzum_bot
     ports:
-      - "5432:5432"
+      # 5432 хоста часто занят другими проектами на общем VDS — контейнер слушает
+      # 5433 снаружи, порт 5432 внутри контейнера не меняется (см. DATABASE_URL
+      # в .env.example — там тоже 5433)
+      - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
 
